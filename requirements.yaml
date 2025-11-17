@@ -1,0 +1,7 @@
+name: google_adk_env
+dependencies:
+  - pip==25.2.*
+  - python==3.11.*
+  - pip:
+    - google-sdk==1.18.0
+    - litellm==1.80.0
