@@ -65,3 +65,15 @@ adk api_server
 ### 1.4 Setting up open-source models
 
 https://google.github.io/adk-docs/agents/models/#ollama-integration
+
+In order for agentic handover to work correctly, the models need to have sufficient capacity. Minimal capacity for this
+tutorial can be achieved with gemini 2.0 flash https://docs.cloud.google.com/vertex-ai/generative-ai/docs/models/gemini/2-0-flash.
+
+Leaderboards assessing model performance on tool calling can be found at
+
+- https://gorilla.cs.berkeley.edu/leaderboard.html
+- https://huggingface.co/spaces/galileo-ai/agent-leaderboard
+
+These suggest that a model needs a minimum of 600b params to have reasonably predictable function calling performance.
+DeepSeek-V3.2-Exp (Prompt + Thinking) ranked 5 overall on 3rd Nov 2025 on the Berkeley leaderboard. Using ollama,
+c. 400GB capacity are needed to run this https://ollama.com/library/deepseek-v3.1.
