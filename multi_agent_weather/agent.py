@@ -7,6 +7,7 @@ from typing import Optional  # Make sure to import Optional
 
 from google.adk.agents import Agent
 from google.adk.models.lite_llm import LiteLlm  # For multi-model support
+from google.adk.tools.tool_context import ToolContext
 from google.adk.sessions import InMemorySessionService
 from google.adk.runners import Runner
 from google.genai import types  # For creating message Content/Parts
@@ -53,6 +54,70 @@ def get_weather(city: str) -> dict:
 print("\nWeather retrieval tool defined.")
 
 
+def get_weather_stateful(city: str, tool_context: ToolContext) -> dict:
+    """Retrieves weather, converts temp unit based on session state."""
+    print(f"--- Tool: get_weather_stateful called for {city} ---")
+
+    # --- Read preference from state ---
+    preferred_unit = tool_context.state.get("user_preference_temperature_unit", "Celsius")  # Default to Celsius
+    print(f"--- Tool: Reading state 'user_preference_temperature_unit': {preferred_unit} ---")
+
+    city_normalized = city.lower().replace(" ", "")
+
+    # Mock weather data (always stored in Celsius internally)
+    mock_weather_db = {
+        "newyork": {"temp_c": 25, "condition": "sunny"},
+        "london": {"temp_c": 15, "condition": "cloudy"},
+        "tokyo": {"temp_c": 18, "condition": "light rain"},
+    }
+
+    if city_normalized in mock_weather_db:
+        data = mock_weather_db[city_normalized]
+        temp_c = data["temp_c"]
+        condition = data["condition"]
+
+        # Format temperature based on state preference
+        if preferred_unit == "Fahrenheit":
+            temp_value = (temp_c * 9 / 5) + 32  # Calculate Fahrenheit
+            temp_unit = "°F"
+        else:  # Default to Celsius
+            temp_value = temp_c
+            temp_unit = "°C"
+
+        report = f"The weather in {city.capitalize()} is {condition} with a temperature of {temp_value:.0f}{temp_unit}."
+        result = {"status": "success", "report": report}
+        print(f"--- Tool: Generated report in {preferred_unit}. Result: {result} ---")
+
+        # Example of writing back to state (optional for this tool)
+        tool_context.state["last_city_checked_stateful"] = city
+        print(f"--- Tool: Updated state 'last_city_checked_stateful': {city} ---")
+
+        return result
+    else:
+        # Handle city not found
+        error_msg = f"Sorry, I don't have weather information for '{city}'."
+        print(f"--- Tool: City '{city}' not found. ---")
+
+        tool_context.state["last_city_checked_stateful"] = None
+        print(f"--- Tool: Updated state 'last_city_checked_stateful': None ---")
+
+        return {"status": "error", "error_message": error_msg}
+
+
+print("✅ State-aware 'get_weather_stateful' tool defined.")
+
+
+def change_state_temperature_units(units: str, tool_context: ToolContext) -> None:
+    """Changes the state temperature units between Celsius and Fahrenheit
+
+        Args:
+        units (str): The unit to measure temperature in. Can be either Fahrenheit or Celsius
+
+    Returns:
+        None"""
+    tool_context.state['user_preference_temperature_unit'] = units
+
+
 def say_hello(name: Optional[str] = None) -> str:
     """Provides a simple greeting. If a name is provided, it will be used.
 
@@ -90,9 +155,7 @@ MODEL_GPT_4O = "openai/gpt-4.1"  # You can also try: gpt-4.1-mini, gpt-4o etc.
 # More supported models can be referenced here: https://docs.litellm.ai/docs/providers/anthropic
 MODEL_CLAUDE_SONNET = "anthropic/claude-sonnet-4-20250514"  # You can also try: claude-opus-4-20250514 , claude-3-7-sonnet-20250219 etc
 
-MODEL_LLAMA_3_1 = "ollama_chat/llama3.1-modified:latest"
-
-MODEL_GPT_OSS_20b = "ollama_chat/gpt-oss:20b-modified"
+MODEL_LLAMA_3_2 = "ollama_chat/llama3.2-modified"
 
 print("\nEnvironment configured.")
 
@@ -112,7 +175,8 @@ greeting_agent = None
 try:
     greeting_agent = Agent(
         # Using a potentially different/cheaper model for a simple task
-        model=MODEL_GEMINI_2_0_FLASH,  # LiteLlm(MODEL_LLAMA_3_1) systematically calls the wrong tools/passes to incorrect agent
+        model=MODEL_GEMINI_2_0_FLASH,
+        # LiteLlm(MODEL_LLAMA_3_1) systematically calls the wrong tools/passes to incorrect agent
         # model=MODEL_GEMINI_2_0_FLASH, # If you would like to use the default flash gemini
         name="greeting_agent",
         instruction="You are the Greeting Agent  powered by Llama-3.1. "
@@ -133,7 +197,8 @@ farewell_agent = None
 try:
     farewell_agent = Agent(
         # Can use the same or a different model
-        model=MODEL_GEMINI_2_0_FLASH,  # LiteLlm(MODEL_LLAMA_3_1) systematically calls the wrong tools/passes to incorrect agent
+        model=MODEL_GEMINI_2_0_FLASH,
+        # LiteLlm(MODEL_LLAMA_3_1) systematically calls the wrong tools/passes to incorrect agent
         # model=MODEL_GEMINI_2_0_FLASH, # If you would like to use the default flash gemini
         name="farewell_agent",
         instruction="You are the Farewell Agent powered by Llama-3.1. "
@@ -161,20 +226,16 @@ if greeting_agent and farewell_agent and 'get_weather' in globals():
     root_agent = Agent(
         name="weather_orchestrator_agent",
         model=root_agent_model,
-        description="The main coordinator agent. Handles weather requests and delegates greetings/farewells "
-                    "to specialists.",
-        instruction="You are the main Weather Agent coordinating a team. Your primary responsibility is "
-                    "to provide weather information. Use the 'get_weather' tool ONLY for specific weather requests "
-                    "(e.g., 'weather in London'). You have specialized sub-agents: "
-                    "1. 'greeting_agent': Handles simple greetings like 'Hi', 'Hello'. Delegate to it for these. "
-                    "2. 'farewell_agent': Handles simple farewells like 'Bye', 'See you'. Delegate to it for these. "
-                    "Analyze the user's query. If it's a greeting, delegate to 'greeting_agent'. "
-                    "If it's a farewell, delegate to 'farewell_agent'. "
-                    "If it's a weather request, handle it yourself using 'get_weather'. "
-                    "For anything else, respond appropriately or state you cannot handle it.",
-        tools=[get_weather],  # Root agent still needs the weather tool for its core task
-        # Key change: Link the sub-agents here!
-        sub_agents=[greeting_agent, farewell_agent]
+        description="Main agent: Provides weather (state-aware unit), delegates greetings/farewells to sub-agents, "
+                    "saves report to state.",
+        instruction="You are the main Weather Agent. Your jobs are to provide weather using the 'get_weather_stateful' "
+                    "tool and to change the temperature units using the 'change_state_temperature_units' tool. "
+                    "Delegate simple greetings to 'greeting_agent' and farewells to 'farewell_agent'. "
+                    "Handle only weather requests, temperature unit changes, greetings, and farewells.",
+        tools=[get_weather_stateful, change_state_temperature_units],  # Root agent needs the weather tool for its core task
+        sub_agents=[greeting_agent, farewell_agent],  # Include sub-agents
+        output_key="last_weather_report"
+        # Write out to state dictionary final weather response under last_weather_report key
     )
     print(f"✅ Root Agent '{root_agent.name}' created using model '{root_agent_model}' "
           f"with sub-agents: {[sa.name for sa in root_agent.sub_agents]}")
@@ -188,24 +249,6 @@ else:
         print(" - Farewell Agent is missing.")
     if 'get_weather' not in globals():
         print(" - get_weather function is missing.")
-
-
-# Self-hosted ollama model example
-# root_agent = Agent(
-#     model=LiteLlm(model=AGENT_MODEL),
-#     name="weather_agent_llama",
-#     description=(
-#         "Provides weather information (using Llama-3.1 with custom prompt)"
-#     ),
-#     instruction="You are a helpful weather assistant powered by Llama-3.1. "
-#                 "Use the 'get_weather' tool for city weather requests. "
-#                 "Clearly present successful reports or polite error messages based on the tool's output status.",
-#     tools=[
-#         get_weather,
-#     ],
-# )
-#
-# print(f"Agent '{root_agent.name}' created using model '{AGENT_MODEL}'.")
 
 
 # @title Define Agent Interaction Function
@@ -243,46 +286,51 @@ async def main():
     :return:
     """
 
-    try:
+    # --- Session Management ---
+    # Key Concept: SessionService stores conversation history & state.
+    # InMemorySessionService is simple, non-persistent storage for this tutorial.
+    session_service = InMemorySessionService()
 
-        # --- Session Management ---
-        # Key Concept: SessionService stores conversation history & state.
-        # InMemorySessionService is simple, non-persistent storage for this tutorial.
-        session_service = InMemorySessionService()
+    # Define constants for identifying the interaction context
+    APP_NAME = "weather_tutorial_app"
+    USER_ID = "user_1"
+    SESSION_ID = "session_001"  # Using a fixed ID for simplicity
 
-        # Define constants for identifying the interaction context
-        APP_NAME = "weather_tutorial_app"
-        USER_ID = "user_1"
-        SESSION_ID = "session_001"  # Using a fixed ID for simplicity
+    # Define initial state data - user prefers Celsius initially
+    initial_state = {"user_preference_temperature_unit": "Celsius"}
 
-        # Create the specific session where the conversation will happen
-        session = await session_service.create_session(
-            app_name=APP_NAME,
-            user_id=USER_ID,
-            session_id=SESSION_ID
-        )
-        print(f"Session created: App='{APP_NAME}', User='{USER_ID}', Session='{SESSION_ID}'")
+    # Create the specific session where the conversation will happen
+    session = await session_service.create_session(
+        app_name=APP_NAME,
+        user_id=USER_ID,
+        session_id=SESSION_ID,
+        state=initial_state  # <<< Initialize state during session creation
+    )
 
-        # --- Runner ---
-        # Key Concept: Runner orchestrates the agent execution loop.
-        runner = Runner(
-            agent=root_agent,  # The agent we want to run
-            app_name=APP_NAME,  # Associates runs with our app
-            session_service=session_service  # Uses our session manager
-        )
-        print(f"Runner created for agent '{runner.agent.name}'.")
+    # Verify the initial state was set correctly
+    retrieved_session = await session_service.get_session(app_name=APP_NAME,
+                                                          user_id=USER_ID,
+                                                          session_id=SESSION_ID)
 
-        await call_agent_async(query='Tell me the weather in London',
-                               runner=runner,
-                               user_id=USER_ID,
-                               session_id=SESSION_ID)
+    # --- Runner ---
+    # Key Concept: Runner orchestrates the agent execution loop.
+    runner = Runner(
+        agent=root_agent,  # The agent we want to run
+        app_name=APP_NAME,  # Associates runs with our app
+        session_service=session_service  # Uses our session manager
+    )
 
-    except Exception as ex:
-        print(f"An error occurred: {ex}")
+    await call_agent_async(query='Tell me the weather in London',
+                           runner=runner,
+                           user_id=USER_ID,
+                           session_id=SESSION_ID)
 
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        print(f"An error occurred: {e}")
 
     # Example tool usage (optional test)
     # print("\n Testing the get_weather tool")
