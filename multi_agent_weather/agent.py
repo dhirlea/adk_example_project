@@ -2,8 +2,9 @@
 Main script running the multi-agent weather app https://google.github.io/adk-docs/tutorials/agent-team/
 """
 
-import os
 import asyncio
+from typing import Optional  # Make sure to import Optional
+
 from google.adk.agents import Agent
 from google.adk.models.lite_llm import LiteLlm  # For multi-model support
 from google.adk.sessions import InMemorySessionService
@@ -49,6 +50,35 @@ def get_weather(city: str) -> dict:
         return {"status": "error", "error_message": f"Sorry, I don't have weather information for '{city}'."}
 
 
+print("\nWeather retrieval tool defined.")
+
+
+def say_hello(name: Optional[str] = None) -> str:
+    """Provides a simple greeting. If a name is provided, it will be used.
+
+    Args:
+        name (str, optional): The name of the person to greet. Defaults to a generic greeting if not provided.
+
+    Returns:
+        str: A friendly greeting message.
+    """
+    if name:
+        greeting = f"Hello, {name}!"
+        print(f"--- Tool: say_hello called with name: {name} ---")
+    else:
+        greeting = "Hello there!"  # Default greeting if name is None or not explicitly passed
+        print(f"--- Tool: say_hello called without a specific name (name_arg_value: {name}) ---")
+    return greeting
+
+
+def say_goodbye() -> str:
+    """Provides a simple farewell message to conclude the conversation."""
+    print(f"--- Tool: say_goodbye called ---")
+    return "Goodbye! Have a great day."
+
+
+print("\nGreeting and Farewell tools defined.")
+
 # --- Define Model Constants for easier use ---
 
 # More supported models can be referenced here: https://ai.google.dev/gemini-api/docs/models#model-variations
@@ -62,25 +92,103 @@ MODEL_CLAUDE_SONNET = "anthropic/claude-sonnet-4-20250514"  # You can also try: 
 
 MODEL_LLAMA_3_1 = "ollama_chat/llama3.1-modified:latest"
 
+MODEL_GPT_OSS_20b = "ollama_chat/gpt-oss:20b-modified"
+
 print("\nEnvironment configured.")
 
 # @title Define the Weather Agent
 # Use one of the model constants defined earlier
-AGENT_MODEL = MODEL_GEMINI_2_0_FLASH  # Starting with Gemini (MODEL_GEMINI_2_0_FLASH) and can swap to locally hosted llama (MODEL_LLAMA_3_1)
+# Starting with Gemini (MODEL_GEMINI_2_0_FLASH) and can swap to locally hosted llama (MODEL_LLAMA_3_1)
+AGENT_MODEL = MODEL_GEMINI_2_0_FLASH
 
-root_agent = Agent(
-    name="weather_agent_gemini_flash",
-    model=AGENT_MODEL,  # Can be a string for Gemini or a LiteLlm object
-    description="Provides weather information for specific cities.",
-    instruction="You are a helpful weather assistant. "
-                "When the user asks for the weather in a specific city, "
-                "use the 'get_weather' tool to find the information. "
-                "If the tool returns an error, inform the user politely. "
-                "If the tool is successful, present the weather report clearly.",
-    tools=[get_weather],  # Pass the function directly
-)
+# Create a welcome and a farewell sub-agent
+# If you want to use models other than Gemini, Ensure LiteLlm is imported and API keys are set
+# from google.adk.models.lite_llm import LiteLlm
+# MODEL_GPT_4O, MODEL_CLAUDE_SONNET etc. should be defined
+# Or else, continue to use: model = MODEL_GEMINI_2_0_FLASH
 
-print(f"Agent '{root_agent.name}' created using model '{AGENT_MODEL}'.")
+# --- Greeting Agent ---
+greeting_agent = None
+try:
+    greeting_agent = Agent(
+        # Using a potentially different/cheaper model for a simple task
+        model=MODEL_GEMINI_2_0_FLASH,  # LiteLlm(MODEL_LLAMA_3_1) systematically calls the wrong tools/passes to incorrect agent
+        # model=MODEL_GEMINI_2_0_FLASH, # If you would like to use the default flash gemini
+        name="greeting_agent",
+        instruction="You are the Greeting Agent  powered by Llama-3.1. "
+                    "Your ONLY task is to provide a friendly greeting to the user. "
+                    "Use the 'say_hello' tool to generate the greeting. "
+                    "If the user provides their name, make sure to pass it to the tool. "
+                    "Do not perform any other actions.",
+        description="Handles simple greetings and hellos using the 'say_hello' tool and passes back to "
+                    "weather orchestrator agent.",  # Crucial for delegation
+        tools=[say_hello],
+    )
+    print(f"✅ Agent '{greeting_agent.name}' created using model '{greeting_agent.model}'.")
+except Exception as e:
+    print(f"❌ Could not create Greeting agent. Check API Key ({greeting_agent.model}). Error: {e}")
+
+# --- Farewell Agent ---
+farewell_agent = None
+try:
+    farewell_agent = Agent(
+        # Can use the same or a different model
+        model=MODEL_GEMINI_2_0_FLASH,  # LiteLlm(MODEL_LLAMA_3_1) systematically calls the wrong tools/passes to incorrect agent
+        # model=MODEL_GEMINI_2_0_FLASH, # If you would like to use the default flash gemini
+        name="farewell_agent",
+        instruction="You are the Farewell Agent powered by Llama-3.1. "
+                    "Your ONLY task is to provide a polite goodbye message. "
+                    "Use the 'say_goodbye' tool when the user indicates they are leaving or ending the "
+                    "conversation (e.g., using words like 'bye', 'goodbye', 'thanks bye', 'see you'). "
+                    "Do not perform any other actions.",
+        description="Handles simple farewells and goodbyes using the 'say_goodbye' tool and passes back to "
+                    "weather orchestrator agent.",  # Crucial for delegation
+        tools=[say_goodbye],
+    )
+    print(f"✅ Agent '{farewell_agent.name}' created using model '{farewell_agent.model}'.")
+except Exception as e:
+    print(f"❌ Could not create Farewell agent. Check API Key ({farewell_agent.model}). Error: {e}")
+
+# --- Root Agent --- It is mandatory to define a root_agent in order for the adk to run!
+# Ensure sub-agents were created successfully before defining the root agent.
+# Also ensure the original 'get_weather' tool is defined.
+root_agent = None
+
+if greeting_agent and farewell_agent and 'get_weather' in globals():
+    # Let's use a capable Gemini model for the root agent to handle orchestration
+    root_agent_model = MODEL_GEMINI_2_0_FLASH
+
+    root_agent = Agent(
+        name="weather_orchestrator_agent",
+        model=root_agent_model,
+        description="The main coordinator agent. Handles weather requests and delegates greetings/farewells "
+                    "to specialists.",
+        instruction="You are the main Weather Agent coordinating a team. Your primary responsibility is "
+                    "to provide weather information. Use the 'get_weather' tool ONLY for specific weather requests "
+                    "(e.g., 'weather in London'). You have specialized sub-agents: "
+                    "1. 'greeting_agent': Handles simple greetings like 'Hi', 'Hello'. Delegate to it for these. "
+                    "2. 'farewell_agent': Handles simple farewells like 'Bye', 'See you'. Delegate to it for these. "
+                    "Analyze the user's query. If it's a greeting, delegate to 'greeting_agent'. "
+                    "If it's a farewell, delegate to 'farewell_agent'. "
+                    "If it's a weather request, handle it yourself using 'get_weather'. "
+                    "For anything else, respond appropriately or state you cannot handle it.",
+        tools=[get_weather],  # Root agent still needs the weather tool for its core task
+        # Key change: Link the sub-agents here!
+        sub_agents=[greeting_agent, farewell_agent]
+    )
+    print(f"✅ Root Agent '{root_agent.name}' created using model '{root_agent_model}' "
+          f"with sub-agents: {[sa.name for sa in root_agent.sub_agents]}")
+
+else:
+    print("❌ Cannot create root agent because one or more sub-agents failed to initialize "
+          "or 'get_weather' tool is missing.")
+    if not greeting_agent:
+        print(" - Greeting Agent is missing.")
+    if not farewell_agent:
+        print(" - Farewell Agent is missing.")
+    if 'get_weather' not in globals():
+        print(" - get_weather function is missing.")
+
 
 # Self-hosted ollama model example
 # root_agent = Agent(
@@ -135,14 +243,6 @@ async def main():
     :return:
     """
 
-    # Example tool usage (optional test)
-    print("\n Testing the get_weather tool")
-    print(get_weather("New York"))
-    print(get_weather("Paris"))
-    print("\n get_weather tool test completed")
-
-    # @title Setup Session Service and Runner
-
     try:
 
         # --- Session Management ---
@@ -177,8 +277,18 @@ async def main():
                                user_id=USER_ID,
                                session_id=SESSION_ID)
 
-    except Exception as e:
-        print(f"An error occurred: {e}")
+    except Exception as ex:
+        print(f"An error occurred: {ex}")
+
 
 if __name__ == '__main__':
     asyncio.run(main())
+
+    # Example tool usage (optional test)
+    # print("\n Testing the get_weather tool")
+    # print(get_weather("New York"))
+    # print(get_weather("Paris"))
+    # print("\n get_weather tool test completed")
+    # print(say_hello(name='Dan'))
+    # print(say_hello(name=None))
+    # print(say_goodbye())
