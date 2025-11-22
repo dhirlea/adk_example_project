@@ -2,11 +2,15 @@
 Main script running the multi-agent weather app https://google.github.io/adk-docs/tutorials/agent-team/
 """
 
+import os
 import asyncio
-from typing import Optional  # Make sure to import Optional
+from typing import Optional, Dict, Any  # Make sure to import Optional
 
 from google.adk.agents import Agent
-from google.adk.models.lite_llm import LiteLlm  # For multi-model support
+from google.adk.agents.callback_context import CallbackContext
+from google.adk.models import LlmResponse, LlmRequest
+# from google.adk.models.lite_llm import LiteLlm  # For multi-model support
+from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
 from google.adk.sessions import InMemorySessionService
 from google.adk.runners import Runner
@@ -20,6 +24,11 @@ warnings.filterwarnings("ignore")
 import logging
 
 logging.basicConfig(level=logging.ERROR)
+
+# Gemini API Key (Get from Google AI Studio: https://aistudio.google.com/app/apikey)
+# Set this directly in the script to run it as a script instead of using adk run.
+# Useful when debugging agentic team state via the async main function
+os.environ["GOOGLE_API_KEY"] = ""
 
 
 # @title Define the get_weather Tool
@@ -142,7 +151,101 @@ def say_goodbye() -> str:
     return "Goodbye! Have a great day."
 
 
-print("\nGreeting and Farewell tools defined.")
+print("\nGreeting, Farewell and Change Tem Units tools defined.")
+
+
+def block_keyword_guardrail(
+        callback_context: CallbackContext, llm_request: LlmRequest
+) -> Optional[LlmResponse]:
+    """
+    Inspects the latest user message for 'BLOCK'. If found, blocks the LLM call
+    and returns a predefined LlmResponse. Otherwise, returns None to proceed.
+    """
+    agent_name = callback_context.agent_name  # Get the name of the agent whose model call is being intercepted
+    print(f"--- Callback: block_keyword_guardrail running for agent: {agent_name} ---")
+
+    # Extract the text from the latest user message in the request history
+    last_user_message_text = ""
+    if llm_request.contents:
+        # Find the most recent message with role 'user'
+        for content in reversed(llm_request.contents):
+            if content.role == 'user' and content.parts:
+                # Assuming text is in the first part for simplicity
+                if content.parts[0].text:
+                    last_user_message_text = content.parts[0].text
+                    break  # Found the last user message text
+
+    print(f"--- Callback: Inspecting last user message: '{last_user_message_text[:100]}...' ---")  # Log first 100 chars
+
+    # --- Guardrail Logic ---
+    keyword_to_block = "BLOCK"
+    if keyword_to_block in last_user_message_text.upper():  # Case-insensitive check
+        print(f"--- Callback: Found '{keyword_to_block}'. Blocking LLM call! ---")
+        # Optionally, set a flag in state to record the block event
+        callback_context.state["guardrail_block_keyword_triggered"] = True
+        print(f"--- Callback: Set state 'guardrail_block_keyword_triggered': True ---")
+
+        # Construct and return an LlmResponse to stop the flow and send this back instead
+        return LlmResponse(
+            content=types.Content(
+                role="model",  # Mimic a response from the agent's perspective
+                parts=[types.Part(
+                    text=f"I cannot process this request because it contains the blocked keyword '{keyword_to_block}'.")],
+            )
+            # Note: You could also set an error_message field here if needed
+        )
+    else:
+        # Keyword not found, allow the request to proceed to the LLM
+        print(f"--- Callback: Keyword not found. Allowing LLM call for {agent_name}. ---")
+        return None  # Returning None signals ADK to continue normally
+
+
+print("✅ block_keyword_guardrail function defined.")
+
+
+def block_paris_tool_guardrail(
+        tool: BaseTool, args: Dict[str, Any], tool_context: ToolContext
+) -> Optional[Dict]:
+    """
+    Checks if 'get_weather_stateful' is called for 'Paris'.
+    If so, blocks the tool execution and returns a specific error dictionary.
+    Otherwise, allows the tool call to proceed by returning None.
+    """
+    tool_name = tool.name
+    agent_name = tool_context.agent_name  # Agent attempting the tool call
+    print(f"--- Callback: block_paris_tool_guardrail running for tool '{tool_name}' in agent '{agent_name}' ---")
+    print(f"--- Callback: Inspecting args: {args} ---")
+
+    # --- Guardrail Logic ---
+    target_tool_name = "get_weather_stateful"  # Match the function name used by FunctionTool
+    blocked_city = "paris"
+
+    # Check if it's the correct tool and the city argument matches the blocked city
+    if tool_name == target_tool_name:
+        city_argument = args.get("city", "")  # Safely get the 'city' argument
+        if city_argument and city_argument.lower() == blocked_city:
+            print(f"--- Callback: Detected blocked city '{city_argument}'. Blocking tool execution! ---")
+            # Optionally update state
+            tool_context.state["guardrail_tool_block_triggered"] = True
+            print(f"--- Callback: Set state 'guardrail_tool_block_triggered': True ---")
+
+            # Return a dictionary matching the tool's expected output format for errors
+            # This dictionary becomes the tool's result, skipping the actual tool run.
+            return {
+                "status": "error",
+                "error_message": f"Policy restriction: Weather checks for '{city_argument.capitalize()}' are currently disabled by a tool guardrail."
+            }
+        else:
+            print(f"--- Callback: City '{city_argument}' is allowed for tool '{tool_name}'. ---")
+    else:
+        print(f"--- Callback: Tool '{tool_name}' is not the target tool. Allowing. ---")
+
+    # If the checks above didn't return a dictionary, allow the tool to execute
+    print(f"--- Callback: Allowing tool '{tool_name}' to proceed. ---")
+    return None  # Returning None allows the actual tool function to run
+
+
+print("✅ block_paris_tool_guardrail function defined.")
 
 # --- Define Model Constants for easier use ---
 
@@ -232,10 +335,13 @@ if greeting_agent and farewell_agent and 'get_weather' in globals():
                     "tool and to change the temperature units using the 'change_state_temperature_units' tool. "
                     "Delegate simple greetings to 'greeting_agent' and farewells to 'farewell_agent'. "
                     "Handle only weather requests, temperature unit changes, greetings, and farewells.",
-        tools=[get_weather_stateful, change_state_temperature_units],  # Root agent needs the weather tool for its core task
+        tools=[get_weather_stateful, change_state_temperature_units],
+        # Root agent needs the weather tool for its core task
         sub_agents=[greeting_agent, farewell_agent],  # Include sub-agents
-        output_key="last_weather_report"
-        # Write out to state dictionary final weather response under last_weather_report key
+        output_key="last_weather_report",
+        # Write out to state dictionary final root agent response under last_weather_report key
+        before_model_callback=block_keyword_guardrail,  # <<< Assign the guardrail callback
+        before_tool_callback=block_paris_tool_guardrail  # <<< Add tool guardrail
     )
     print(f"✅ Root Agent '{root_agent.name}' created using model '{root_agent_model}' "
           f"with sub-agents: {[sa.name for sa in root_agent.sub_agents]}")
@@ -307,11 +413,6 @@ async def main():
         state=initial_state  # <<< Initialize state during session creation
     )
 
-    # Verify the initial state was set correctly
-    retrieved_session = await session_service.get_session(app_name=APP_NAME,
-                                                          user_id=USER_ID,
-                                                          session_id=SESSION_ID)
-
     # --- Runner ---
     # Key Concept: Runner orchestrates the agent execution loop.
     runner = Runner(
@@ -320,10 +421,40 @@ async def main():
         session_service=session_service  # Uses our session manager
     )
 
-    await call_agent_async(query='Tell me the weather in London',
+    await call_agent_async(query="BLOCK the weather in London",  # should trigger model callback
                            runner=runner,
                            user_id=USER_ID,
                            session_id=SESSION_ID)
+
+    await call_agent_async(query="What's it like in Paris?",  # should trigger tool callback
+                           runner=runner,
+                           user_id=USER_ID,
+                           session_id=SESSION_ID)
+
+    await call_agent_async(query="What's it like in Tokyo?", # should know the answer
+                           runner=runner,
+                           user_id=USER_ID,
+                           session_id=SESSION_ID)
+
+    await call_agent_async(query='Goodbye',  # should delegate and say goodbye
+                           runner=runner,
+                           user_id=USER_ID,
+                           session_id=SESSION_ID)
+
+    # Verify that the BLOCK keyword guardrail flag has been set correctly
+
+    final_session = await session_service.get_session(app_name=APP_NAME,
+                                                      user_id=USER_ID,
+                                                      session_id=SESSION_ID)
+
+    print(f"Guardrail Triggered Flag: "
+          f"{final_session.state.get('guardrail_block_keyword_triggered', 'Not Set (or False)')}")
+
+    print(f"Guardrail Triggered Flag: "
+          f"{final_session.state.get('guardrail_tool_block_triggered', 'Not Set (or False)')}")
+
+    print(
+        f"Last Weather Report: {final_session.state.get('last_weather_report', 'Not Set')}")
 
 
 if __name__ == '__main__':
